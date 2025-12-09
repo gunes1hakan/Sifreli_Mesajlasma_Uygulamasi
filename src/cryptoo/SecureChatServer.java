@@ -6,6 +6,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+/**
+ * Sadece satır ileten çok basit bir chat server:
+ *  - Şifreyi bilmez, dokunmaz.
+ *  - Gelen her satırı tüm diğer client'lara broadcast eder.
+ */
 public class SecureChatServer {
     private final int port;
     private final List<ClientHandler> clients = new CopyOnWriteArrayList<>();
@@ -54,8 +59,10 @@ public class SecureChatServer {
         ClientHandler(Socket socket, SecureChatServer server) throws IOException {
             this.socket = socket;
             this.server = server;
-            this.in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
-            this.out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true);
+            this.in = new BufferedReader(new InputStreamReader(
+                    socket.getInputStream(), StandardCharsets.UTF_8));
+            this.out = new PrintWriter(new OutputStreamWriter(
+                    socket.getOutputStream(), StandardCharsets.UTF_8), true);
             System.out.println("[Server] Connected: " + socket.getRemoteSocketAddress());
         }
 
@@ -63,11 +70,11 @@ public class SecureChatServer {
             out.println(line);
         }
 
-        @Override public void run() {
+        @Override
+        public void run() {
             try {
                 String line;
                 while ((line = in.readLine()) != null) {
-                    // Sunucu şifreyi bilmez; sadece iletir.
                     server.broadcast(line, this);
                 }
             } catch (IOException ignored) {
