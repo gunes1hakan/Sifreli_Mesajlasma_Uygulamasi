@@ -42,7 +42,13 @@ public class SecureChatClient extends JFrame {
             "Polybius 5x5",
             "Pigpen (Mason)",
             "AES-GCM (PBKDF2 / Oturum)",
-            "DES (ECB)"
+            "DES (ECB)",
+            "Hill",
+            "3DES (DESede)",
+            "Blowfish",
+            "GOST 28147",
+            "Feistel (Toy)",
+            "SPN (Toy)",
     };
     private final JComboBox<String> cbAlgo = new JComboBox<>(ALGO_OPTIONS);
     private final JTextField tfKey = new JTextField();
@@ -401,6 +407,12 @@ public class SecureChatClient extends JFrame {
         if (s.startsWith("Pigpen"))        return CryptoUtils.ALGO_PIGPEN;
         if (s.startsWith("AES-GCM"))       return CryptoUtils.ALGO_AES_GCM;
         if (s.startsWith("DES"))           return CryptoUtils.ALGO_DES;
+        if (s.startsWith("Hill"))          return CryptoUtils.ALGO_HILL;
+        if (s.startsWith("3DES"))          return CryptoUtils.ALGO_3DES;
+        if (s.startsWith("Blowfish"))      return CryptoUtils.ALGO_BLOWFISH;
+        if (s.startsWith("GOST"))          return CryptoUtils.ALGO_GOST;
+        if (s.startsWith("Feistel"))       return CryptoUtils.ALGO_FEISTEL;
+        if (s.startsWith("SPN"))           return CryptoUtils.ALGO_SPN;
 
         return CryptoUtils.ALGO_NONE;
     }

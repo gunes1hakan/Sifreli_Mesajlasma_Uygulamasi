@@ -38,6 +38,13 @@ public final class CryptoUtils {
     public static final String ALGO_PIGPEN     = "PIGPEN";
     public static final String ALGO_AES_GCM    = "AES_GCM";
     public static final String ALGO_DES        = "DES";
+    public static final String ALGO_HILL       = "HILL";
+    public static final String ALGO_3DES       = "3DES";
+    public static final String ALGO_BLOWFISH   = "BLOWFISH";
+    public static final String ALGO_GOST       = "GOST";
+    public static final String ALGO_FEISTEL    = "FEISTEL"; // toy
+    public static final String ALGO_SPN        = "SPN";     // toy
+
 
     // ---- Ortak sabitler ----
     private static final String TR_ALPHABET = "ABCÇDEFGĞHIİJKLMNOÖPRSŞTUÜVYZ";
@@ -88,6 +95,18 @@ public final class CryptoUtils {
                 return aesGcmEncryptCanonical(plain, key);
             case ALGO_DES:
                 return desEncryptCanonical(plain, key);
+            case ALGO_HILL:
+                return hillEncryptAuto(plain, key);
+            case ALGO_3DES:
+                return tripleDesEncryptCanonical(plain, key);
+            case ALGO_BLOWFISH:
+                return blowfishEncryptCanonical(plain, key);
+            case ALGO_GOST:
+                return gostEncryptCanonical(plain, key);
+            case ALGO_FEISTEL:
+                return feistelToyEncrypt(plain, key);
+            case ALGO_SPN:
+                return spnToyEncrypt(plain, key);
             default:
                 return plain;
         }
@@ -126,6 +145,18 @@ public final class CryptoUtils {
                 return aesGcmDecryptCanonical(cipher, key);
             case ALGO_DES:
                 return desDecryptCanonical(cipher, key);
+            case ALGO_HILL:
+                return hillDecryptAuto(cipher, key);
+            case ALGO_3DES:
+                return tripleDesDecryptCanonical(cipher, key);
+            case ALGO_BLOWFISH:
+                return blowfishDecryptCanonical(cipher, key);
+            case ALGO_GOST:
+                return gostDecryptCanonical(cipher, key);
+            case ALGO_FEISTEL:
+                return feistelToyDecrypt(cipher, key);
+            case ALGO_SPN:
+                return spnToyDecrypt(cipher, key);
             default:
                 return cipher;
         }
@@ -967,4 +998,311 @@ public final class CryptoUtils {
         byte[] pt = c.doFinal(ct);
         return new String(pt, StandardCharsets.UTF_8);
     }
+    
+ // ======================= HILL (2x2 / 3x3) =======================
+    private static String hillEncryptAuto(String text, String key) {
+        HillKey hk = HillKey.parse(key);
+        return hillProcess(text, hk, true);
+    }
+
+    private static String hillDecryptAuto(String cipher, String key) {
+        HillKey hk = HillKey.parse(key).inverse();
+        return hillProcess(cipher, hk, true);
+    }
+
+    private static String hillProcess(String s, HillKey hk, boolean keepNonLetters) {
+        // TR alfabetik çalıştırmak istersen: TR_ALPHABET kullanır.
+        // Hill klasik olarak 26 ile çalışır; burada TR_ALPHABET (29) ile çalışıyoruz.
+        final int mod = TR_ALPHABET.length();
+
+        StringBuilder out = new StringBuilder();
+        StringBuilder buf = new StringBuilder();
+
+        for (int i = 0; i < s.length(); i++) {
+            char ch = safeChar(s.charAt(i));
+            if (isTrLetter(ch)) buf.append(ch);
+            else {
+                if (keepNonLetters) {
+                    out.append(hillBlockTransform(buf.toString(), hk, mod));
+                    buf.setLength(0);
+                    out.append(s.charAt(i));
+                }
+            }
+        }
+        out.append(hillBlockTransform(buf.toString(), hk, mod));
+        return out.toString();
+    }
+
+    private static String hillBlockTransform(String letters, HillKey hk, int mod) {
+        if (letters.isEmpty()) return "";
+        int n = hk.n;
+        StringBuilder res = new StringBuilder();
+
+        int idx = 0;
+        while (idx < letters.length()) {
+            int[] v = new int[n];
+            for (int i = 0; i < n; i++) {
+                if (idx + i < letters.length()) {
+                    v[i] = alphaIndex(letters.charAt(idx + i));
+                } else {
+                    v[i] = alphaIndex('X'); // pad
+                }
+            }
+            int[] w = hk.mul(v, mod);
+            for (int i = 0; i < n; i++) {
+                res.append(TR_ALPHABET.charAt(w[i]));
+            }
+            idx += n;
+        }
+        return res.toString();
+    }
+
+    private static class HillKey {
+        final int n;
+        final int[][] m;
+
+        HillKey(int n, int[][] m) { this.n = n; this.m = m; }
+
+        static HillKey parse(String key) {
+            if (key == null) throw new IllegalArgumentException("Hill key boş olamaz");
+            String[] parts = key.split("[,;\\s]+");
+            if (parts.length == 4) {
+                int[][] m = new int[][]{
+                        { Integer.parseInt(parts[0]), Integer.parseInt(parts[1]) },
+                        { Integer.parseInt(parts[2]), Integer.parseInt(parts[3]) }
+                };
+                return new HillKey(2, m);
+            } else if (parts.length == 9) {
+                int[][] m = new int[][]{
+                        { Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]) },
+                        { Integer.parseInt(parts[3]), Integer.parseInt(parts[4]), Integer.parseInt(parts[5]) },
+                        { Integer.parseInt(parts[6]), Integer.parseInt(parts[7]), Integer.parseInt(parts[8]) }
+                };
+                return new HillKey(3, m);
+            }
+            throw new IllegalArgumentException("Hill key formatı: 2x2 için 4 sayı, 3x3 için 9 sayı olmalı.");
+        }
+
+        int[] mul(int[] v, int mod) {
+            int[] r = new int[n];
+            for (int i = 0; i < n; i++) {
+                long sum = 0;
+                for (int j = 0; j < n; j++) sum += (long)m[i][j] * v[j];
+                int x = (int)(sum % mod);
+                if (x < 0) x += mod;
+                r[i] = x;
+            }
+            return r;
+        }
+
+        HillKey inverse() {
+            // 2x2 ve 3x3 için modüler ters (basit eğitim implementasyonu)
+            int mod = TR_ALPHABET.length();
+            if (n == 2) return inverse2(mod);
+            if (n == 3) return inverse3(mod);
+            throw new IllegalStateException("Hill inverse sadece 2x2/3x3 destekli.");
+        }
+
+        private HillKey inverse2(int mod) {
+            int a=m[0][0], b=m[0][1], c=m[1][0], d=m[1][1];
+            int det = (a*d - b*c) % mod; if (det<0) det+=mod;
+            int detInv = modInverse(det, mod);
+            int[][] inv = new int[][]{
+                    { ( d*detInv)%mod, ((-b)*detInv)%mod },
+                    { ((-c)*detInv)%mod, ( a*detInv)%mod }
+            };
+            for (int i=0;i<2;i++) for(int j=0;j<2;j++){ inv[i][j]%=mod; if(inv[i][j]<0) inv[i][j]+=mod; }
+            return new HillKey(2, inv);
+        }
+
+        private HillKey inverse3(int mod) {
+            int[][] A = m;
+            int det =
+                    A[0][0]*(A[1][1]*A[2][2]-A[1][2]*A[2][1]) -
+                    A[0][1]*(A[1][0]*A[2][2]-A[1][2]*A[2][0]) +
+                    A[0][2]*(A[1][0]*A[2][1]-A[1][1]*A[2][0]);
+            det %= mod; if (det<0) det+=mod;
+            int detInv = modInverse(det, mod);
+
+            int[][] adj = new int[3][3];
+            adj[0][0] =  (A[1][1]*A[2][2]-A[1][2]*A[2][1]);
+            adj[0][1] = -(A[1][0]*A[2][2]-A[1][2]*A[2][0]);
+            adj[0][2] =  (A[1][0]*A[2][1]-A[1][1]*A[2][0]);
+
+            adj[1][0] = -(A[0][1]*A[2][2]-A[0][2]*A[2][1]);
+            adj[1][1] =  (A[0][0]*A[2][2]-A[0][2]*A[2][0]);
+            adj[1][2] = -(A[0][0]*A[2][1]-A[0][1]*A[2][0]);
+
+            adj[2][0] =  (A[0][1]*A[1][2]-A[0][2]*A[1][1]);
+            adj[2][1] = -(A[0][0]*A[1][2]-A[0][2]*A[1][0]);
+            adj[2][2] =  (A[0][0]*A[1][1]-A[0][1]*A[1][0]);
+
+            // transpose(adj) * detInv
+            int[][] inv = new int[3][3];
+            for (int i=0;i<3;i++) for(int j=0;j<3;j++){
+                long x = (long)adj[j][i] * detInv;
+                int v = (int)(x % mod); if(v<0) v+=mod;
+                inv[i][j] = v;
+            }
+            return new HillKey(3, inv);
+        }
+    }
+
+    private static int modInverse(int a, int m) {
+        // a^-1 mod m
+        int t=0, newt=1, r=m, newr=a%m;
+        if (newr<0) newr+=m;
+        while(newr!=0){
+            int q=r/newr;
+            int tmp=t-q*newt; t=newt; newt=tmp;
+            tmp=r-q*newr; r=newr; newr=tmp;
+        }
+        if (r!=1) throw new IllegalArgumentException("Hill key determinant invertible değil (mod " + m + ")");
+        if (t<0) t+=m;
+        return t;
+    }
+
+	 // ======================= 3DES =======================
+	 // Kanonik format: cipherBase64
+	 private static String tripleDesEncryptCanonical(String plain, String keyStr) throws Exception {
+	     if (keyStr == null || keyStr.isEmpty()) throw new IllegalArgumentException("3DES key gerekli");
+	     byte[] k = keyStr.getBytes(StandardCharsets.UTF_8);
+	     byte[] k24 = new byte[24];
+	     for (int i = 0; i < 24; i++) k24[i] = (i < k.length) ? k[i] : 0;
+	
+	     javax.crypto.SecretKey key = new javax.crypto.spec.SecretKeySpec(k24, "DESede");
+	     javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("DESede/ECB/PKCS5Padding");
+	     c.init(javax.crypto.Cipher.ENCRYPT_MODE, key);
+	     byte[] ct = c.doFinal(plain.getBytes(StandardCharsets.UTF_8));
+	     return Base64.getEncoder().encodeToString(ct);
+	 }
+	
+	 private static String tripleDesDecryptCanonical(String canonical, String keyStr) throws Exception {
+	     if (keyStr == null || keyStr.isEmpty()) throw new IllegalArgumentException("3DES key gerekli");
+	     byte[] k = keyStr.getBytes(StandardCharsets.UTF_8);
+	     byte[] k24 = new byte[24];
+	     for (int i = 0; i < 24; i++) k24[i] = (i < k.length) ? k[i] : 0;
+	
+	     javax.crypto.SecretKey key = new javax.crypto.spec.SecretKeySpec(k24, "DESede");
+	     javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("DESede/ECB/PKCS5Padding");
+	     c.init(javax.crypto.Cipher.DECRYPT_MODE, key);
+	     byte[] pt = c.doFinal(Base64.getDecoder().decode(canonical));
+	     return new String(pt, StandardCharsets.UTF_8);
+	 }
+	 
+	// ======================= BLOWFISH =======================
+	// Kanonik format: cipherBase64
+	private static String blowfishEncryptCanonical(String plain, String keyStr) throws Exception {
+	    if (keyStr == null || keyStr.isEmpty()) throw new IllegalArgumentException("Blowfish key gerekli");
+	    byte[] k = keyStr.getBytes(StandardCharsets.UTF_8);
+	    javax.crypto.SecretKey key = new javax.crypto.spec.SecretKeySpec(k, "Blowfish");
+	    javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("Blowfish/ECB/PKCS5Padding");
+	    c.init(javax.crypto.Cipher.ENCRYPT_MODE, key);
+	    byte[] ct = c.doFinal(plain.getBytes(StandardCharsets.UTF_8));
+	    return Base64.getEncoder().encodeToString(ct);
+	}
+
+	private static String blowfishDecryptCanonical(String canonical, String keyStr) throws Exception {
+	    if (keyStr == null || keyStr.isEmpty()) throw new IllegalArgumentException("Blowfish key gerekli");
+	    byte[] k = keyStr.getBytes(StandardCharsets.UTF_8);
+	    javax.crypto.SecretKey key = new javax.crypto.spec.SecretKeySpec(k, "Blowfish");
+	    javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("Blowfish/ECB/PKCS5Padding");
+	    c.init(javax.crypto.Cipher.DECRYPT_MODE, key);
+	    byte[] pt = c.doFinal(Base64.getDecoder().decode(canonical));
+	    return new String(pt, StandardCharsets.UTF_8);
+	}
+
+	// ======================= GOST 28147 =======================
+	// Kanonik format: cipherBase64
+	private static String gostEncryptCanonical(String plain, String keyStr) throws Exception {
+	    if (keyStr == null || keyStr.isEmpty()) throw new IllegalArgumentException("GOST key gerekli");
+	    byte[] k = keyStr.getBytes(StandardCharsets.UTF_8);
+	    // GOST key 32 byte ister; kısaysa pad
+	    byte[] k32 = new byte[32];
+	    for (int i = 0; i < 32; i++) k32[i] = (i < k.length) ? k[i] : 0;
+
+	    javax.crypto.SecretKey key = new javax.crypto.spec.SecretKeySpec(k32, "GOST28147");
+	    javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("GOST28147/ECB/PKCS5Padding", "BC");
+	    c.init(javax.crypto.Cipher.ENCRYPT_MODE, key);
+	    byte[] ct = c.doFinal(plain.getBytes(StandardCharsets.UTF_8));
+	    return Base64.getEncoder().encodeToString(ct);
+	}
+
+	private static String gostDecryptCanonical(String canonical, String keyStr) throws Exception {
+	    if (keyStr == null || keyStr.isEmpty()) throw new IllegalArgumentException("GOST key gerekli");
+	    byte[] k = keyStr.getBytes(StandardCharsets.UTF_8);
+	    byte[] k32 = new byte[32];
+	    for (int i = 0; i < 32; i++) k32[i] = (i < k.length) ? k[i] : 0;
+
+	    javax.crypto.SecretKey key = new javax.crypto.spec.SecretKeySpec(k32, "GOST28147");
+	    javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("GOST28147/ECB/PKCS5Padding", "BC");
+	    c.init(javax.crypto.Cipher.DECRYPT_MODE, key);
+	    byte[] pt = c.doFinal(Base64.getDecoder().decode(canonical));
+	    return new String(pt, StandardCharsets.UTF_8);
+	}
+
+	// ======================= FEISTEL (TOY) =======================
+	// Kanonik format: base64(bytes)
+	private static String feistelToyEncrypt(String plain, String key) {
+	    byte[] data = plain.getBytes(StandardCharsets.UTF_8);
+	    byte[] out = feistelToy(data, key, true);
+	    return Base64.getEncoder().encodeToString(out);
+	}
+
+	private static String feistelToyDecrypt(String canonical, String key) {
+	    byte[] ct = Base64.getDecoder().decode(canonical);
+	    byte[] out = feistelToy(ct, key, false);
+	    return new String(out, StandardCharsets.UTF_8);
+	}
+
+	private static byte[] feistelToy(byte[] input, String key, boolean enc) {
+	    byte[] k = (key == null ? "k" : key).getBytes(StandardCharsets.UTF_8);
+	    byte[] buf = java.util.Arrays.copyOf(input, input.length + (input.length % 2));
+	    for (int round = 0; round < 16; round++) {
+	        int r = enc ? round : (15 - round);
+	        for (int i = 0; i + 1 < buf.length; i += 2) {
+	            byte L = buf[i];
+	            byte R = buf[i + 1];
+	            byte f = (byte)( (R ^ k[r % k.length]) + r );
+	            buf[i] = R;
+	            buf[i + 1] = (byte)(L ^ f);
+	        }
+	    }
+	    return buf;
+	}
+
+	// ======================= SPN (TOY) =======================
+	private static String spnToyEncrypt(String plain, String key) {
+	    byte[] in = plain.getBytes(StandardCharsets.UTF_8);
+	    return Base64.getEncoder().encodeToString(spnToy(in, key, true));
+	}
+	private static String spnToyDecrypt(String canonical, String key) {
+	    byte[] ct = Base64.getDecoder().decode(canonical);
+	    return new String(spnToy(ct, key, false), StandardCharsets.UTF_8);
+	}
+	private static byte[] spnToy(byte[] data, String key, boolean enc) {
+	    byte[] k = (key == null ? "k" : key).getBytes(StandardCharsets.UTF_8);
+	    int[] sbox = {6,4,12,5,0,7,2,14,1,15,3,13,8,10,9,11};
+	    int[] inv  = new int[16];
+	    for(int i=0;i<16;i++) inv[sbox[i]]=i;
+
+	    byte[] out = java.util.Arrays.copyOf(data, data.length);
+	    for (int round=0; round<8; round++) {
+	        int r = enc ? round : (7-round);
+	        for (int i=0;i<out.length;i++) {
+	            int b = out[i] & 0xFF;
+	            b ^= (k[r % k.length] & 0xFF);
+	            int hi = (b>>>4)&0xF, lo=b&0xF;
+	            hi = enc ? sbox[hi] : inv[hi];
+	            lo = enc ? sbox[lo] : inv[lo];
+	            int sb = (hi<<4)|lo;
+	            // toy perm: bit rotate
+	            int p = enc ? ((sb<<3)|(sb>>>5)) & 0xFF : ((sb>>>3)|(sb<<5)) & 0xFF;
+	            out[i] = (byte)p;
+	        }
+	    }
+	    return out;
+	}
+
+
 }
