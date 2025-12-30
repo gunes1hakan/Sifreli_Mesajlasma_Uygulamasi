@@ -19,6 +19,8 @@ import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.List;
+import java.util.ArrayList;
 
 import javax.crypto.Cipher;
 
@@ -30,29 +32,10 @@ public class SecureChatClient extends JFrame {
     private final JButton btnSendEncrypted = new JButton("Gönder (Şifreli)");
     private final JButton btnSendSessionKey = new JButton("Oturum Anahtarı (RSA)");
 
-    private final String[] ALGO_OPTIONS = {
-            "Caesar (Kaydırma)",
-            "Vigenère",
-            "Substitution (Yerine Koyma)",
-            "Affine (Doğrusal)",
-            "Playfair",
-            "Rail Fence (Çit)",
-            "Route (Spiral/Yol)",
-            "Columnar (Sütunlama)",
-            "Polybius 5x5",
-            "Pigpen (Mason)",
-            "AES-GCM (PBKDF2 / Oturum)",
-            "DES (ECB)",
-            "Hill",
-            "3DES (DESede)",
-            "Blowfish",
-            "GOST 28147",
-            "Feistel (Toy)",
-            "SPN (Toy)",
-    };
-    private final JComboBox<String> cbAlgo = new JComboBox<>(ALGO_OPTIONS);
+    private final JComboBox<String> cbAlgo;
     private final JTextField tfKey = new JTextField();
     private final JLabel lblKeyHint = new JLabel("Parola/Key formatı: (algoritmaya göre)");
+    private final JLabel lblTiming = new JLabel("Süre: -");
 
     private final JTextField tfHost = new JTextField("127.0.0.1");
     private final JTextField tfPort = new JTextField("6000");
@@ -76,8 +59,48 @@ public class SecureChatClient extends JFrame {
     // Oturum anahtarları (nick -> sessionKeyString)
     private final Map<String, String> sessionKeys = new HashMap<>();
 
+    // Rate limiting for PUBREQ replies
+    private final Map<String, Long> lastPubSentMs = new HashMap<>();
+    private static final long PUB_RESEND_DELAY_MS = 2000;
+
     public SecureChatClient() {
         super("Şifreli Sohbet (Client A)");
+
+        // Dinamik algoritma listesi
+        java.util.List<String> algos = new java.util.ArrayList<>();
+        algos.add("Caesar (Kaydırma)");
+        algos.add("Vigenère");
+        algos.add("Substitution (Yerine Koyma)");
+        algos.add("Affine (Doğrusal)");
+        algos.add("Playfair");
+        algos.add("Rail Fence (Çit)");
+        algos.add("Route (Spiral/Yol)");
+        algos.add("Columnar (Sütunlama)");
+        algos.add("Polybius 5x5");
+        algos.add("Pigpen (Mason)");
+        algos.add("Hill");
+        algos.add("3DES (DESede)");
+        algos.add("Blowfish");
+        algos.add("GOST 28147");
+        algos.add("AES-128 (LIB/JCE) - Password");
+        algos.add("DES (LIB/JCE) - Password");
+        algos.add("DES (MANUAL) - Feistel");
+        algos.add("AES (MANUAL) - SPN");
+
+        if (CryptoUtils.isBcAvailable()) {
+            algos.add("AES-128 (LIB/BC) - Password");
+            algos.add("DES (LIB/BC) - Password");
+        }
+
+        // RSA Hybrid Options
+        algos.add("AES-128 (HYBRID RSA\u2192AES) (JCE)");
+        algos.add("DES (HYBRID RSA\u2192DES) (JCE)");
+        if (CryptoUtils.isBcAvailable()) {
+            algos.add("AES-128 (HYBRID RSA\u2192AES) (BC)");
+            algos.add("DES (HYBRID RSA\u2192DES) (BC)");
+        }
+
+        cbAlgo = new JComboBox<>(algos.toArray(new String[0]));
 
         initRSA();
         buildUI();
@@ -85,25 +108,48 @@ public class SecureChatClient extends JFrame {
 
         cbAlgo.addActionListener(e -> {
             String sel = (String) cbAlgo.getSelectedItem();
-            if (sel != null) lblKeyHint.setText("Parola/Key formatı: " + hintFor(sel));
+            if (sel != null)
+                lblKeyHint.setText("Parola/Key formatı: " + hintFor(sel));
         });
     }
 
     private String hintFor(String algoName) {
         switch (algoName) {
-            case "Caesar (Kaydırma)":                 return "Shift (tam sayı), ör: 3";
-            case "Vigenère":                          return "Anahtar kelime, ör: GIZLI";
-            case "Substitution (Yerine Koyma)":       return "29 harfli alfabe veya A:B;C:Ç;...";
-            case "Affine (Doğrusal)":                 return "a,b (ör: 5,8) ve gcd(a,29)=1";
-            case "Playfair":                          return "Anahtar kelime (I/J birleşik)";
-            case "Rail Fence (Çit)":                  return "Ray sayısı (tam sayı)";
-            case "Route (Spiral/Yol)":                return "Sütun sayısı, ops: 'ccw'";
-            case "Columnar (Sütunlama)":              return "Anahtar kelime";
-            case "Polybius 5x5":                      return "Anahtar yok";
-            case "Pigpen (Mason)":                    return "Anahtar yok";
-            case "AES-GCM (PBKDF2 / Oturum)":         return "Parola veya (boş → oturum anahtarı)";
-            case "DES (ECB)":                         return "Anahtar (en az 8 karakter)";
-            default:                                  return "-";
+            case "Caesar (Kaydırma)":
+                return "Shift (tam sayı), ör: 3";
+            case "Vigenère":
+                return "Anahtar kelime, ör: GIZLI";
+            case "Substitution (Yerine Koyma)":
+                return "29 harfli alfabe veya A:B;C:Ç;...";
+            case "Affine (Doğrusal)":
+                return "a,b (ör: 5,8) ve gcd(a,29)=1";
+            case "Playfair":
+                return "Anahtar kelime (I/J birleşik)";
+            case "Rail Fence (Çit)":
+                return "Ray sayısı (tam sayı)";
+            case "Route (Spiral/Yol)":
+                return "Sütun sayısı, ops: 'ccw'";
+            case "Columnar (Sütunlama)":
+                return "Anahtar kelime";
+            case "Polybius 5x5":
+                return "Anahtar yok";
+            case "Pigpen (Mason)":
+                return "Anahtar yok";
+            case "AES-128 (LIB/JCE) - Password":
+                return "Parola ('password' yazın, boş bırakmayın)";
+            case "DES (LIB/JCE) - Password":
+                return "Anahtar (en az 8 karakter)";
+            case "AES-128 (LIB/BC) - Password":
+                return "Parola (BouncyCastle)";
+            case "DES (LIB/BC) - Password":
+                return "Anahtar (BouncyCastle)";
+            case "AES-128 (HYBRID RSA\u2192AES) (JCE)":
+            case "AES-128 (HYBRID RSA\u2192AES) (BC)":
+            case "DES (HYBRID RSA\u2192DES) (JCE)":
+            case "DES (HYBRID RSA\u2192DES) (BC)":
+                return "PUBKEY gerekli (Key alanı yoksayılır)";
+            default:
+                return "-";
         }
     }
 
@@ -160,6 +206,7 @@ public class SecureChatClient extends JFrame {
         JPanel bottom = new JPanel(new BorderLayout(8, 8));
         bottom.add(new JLabel("Mesaj"), BorderLayout.WEST);
         bottom.add(tfMessage, BorderLayout.CENTER);
+        bottom.add(lblTiming, BorderLayout.EAST);
 
         JPanel top = new JPanel(new GridLayout(2, 1, 8, 8));
         top.setBorder(new EmptyBorder(8, 8, 0, 8));
@@ -215,22 +262,46 @@ public class SecureChatClient extends JFrame {
             btnConnect.setText("Kes");
             appendInfo("Bağlandı: " + host + ":" + port);
 
+            // Send Public Keys
             sendPublicKey();
+
+            // Late-joiner: Request other public keys
+            WireMessage req = new WireMessage(
+                    tfNick.getText().trim(), CryptoUtils.ALGO_RSA_PUBREQ, false, "",
+                    "", System.currentTimeMillis());
+            out.println(req.format());
+
         } catch (IOException ex) {
             toast("Bağlanılamadı: " + ex.getMessage());
+            disconnect();
         }
     }
 
     private void disconnect() {
         Thread t = readerThread;
         readerThread = null;
-        if (t != null) t.interrupt();
+        if (t != null)
+            t.interrupt();
 
-        try { if (in != null) in.close(); } catch (Exception ignored) {}
-        try { if (out != null) out.close(); } catch (Exception ignored) {}
-        try { if (socket != null) socket.close(); } catch (Exception ignored) {}
+        try {
+            if (in != null)
+                in.close();
+        } catch (Exception ignored) {
+        }
+        try {
+            if (out != null)
+                out.close();
+        } catch (Exception ignored) {
+        }
+        try {
+            if (socket != null)
+                socket.close();
+        } catch (Exception ignored) {
+        }
 
-        in = null; out = null; socket = null;
+        in = null;
+        out = null;
+        socket = null;
         btnConnect.setText("Bağlan");
         appendInfo("Bağlantı kapatıldı.");
     }
@@ -240,12 +311,21 @@ public class SecureChatClient extends JFrame {
             String line;
             while (!Thread.currentThread().isInterrupted()
                     && (line = in.readLine()) != null) {
-                final String show = handleIncoming(line);
-                if (show != null && !show.isEmpty()) {
-                    SwingUtilities.invokeLater(() -> chatArea.append(show + "\n"));
+                System.out.println("DEBUG: Socket read line: " + line); // Debug log
+                try {
+                    final String show = handleIncoming(line);
+                    if (show != null && !show.isEmpty()) {
+                        SwingUtilities.invokeLater(() -> chatArea.append(show + "\n"));
+                    }
+                } catch (Throwable t) {
+                    System.err.println("CRITICAL: Error processing incoming line: " + t.getMessage());
+                    t.printStackTrace();
+                    SwingUtilities.invokeLater(() -> chatArea
+                            .append("[SİSTEM HATASI] Mesaj işlenirken kritik hata: " + t.toString() + "\n"));
                 }
             }
         } catch (IOException ignored) {
+            System.err.println("Socket IO Exception: " + ignored.getMessage());
         } finally {
             SwingUtilities.invokeLater(() -> {
                 btnConnect.setText("Bağlan");
@@ -267,8 +347,8 @@ public class SecureChatClient extends JFrame {
         final long ts;
 
         WireMessage(String sender, String algorithm,
-                    boolean encrypted, String ivB64,
-                    String payloadB64, long ts) {
+                boolean encrypted, String ivB64,
+                String payloadB64, long ts) {
             this.sender = sender;
             this.algorithm = algorithm;
             this.encrypted = encrypted;
@@ -290,13 +370,14 @@ public class SecureChatClient extends JFrame {
         static WireMessage parse(String line) {
             try {
                 String[] parts = line.split("\\|", 6);
-                if (parts.length != 6) return null;
+                if (parts.length != 6)
+                    return null;
                 String sender = uns(parts[0]);
-                String algo   = uns(parts[1]);
-                boolean enc   = Boolean.parseBoolean(parts[2]);
-                String iv     = uns(parts[3]);
-                String pl     = uns(parts[4]);
-                long ts       = Long.parseLong(parts[5]);
+                String algo = uns(parts[1]);
+                boolean enc = Boolean.parseBoolean(parts[2]);
+                String iv = uns(parts[3]);
+                String pl = uns(parts[4]);
+                long ts = Long.parseLong(parts[5]);
                 return new WireMessage(sender, algo, enc, iv, pl, ts);
             } catch (Exception e) {
                 return null;
@@ -317,34 +398,147 @@ public class SecureChatClient extends JFrame {
     // ==========================================================
 
     private String handleIncoming(String line) {
+        long start = System.nanoTime();
+        try {
+            String result = handleIncomingInternal(line);
+            long end = System.nanoTime();
+            if (result != null && !result.startsWith("[PUBKEY") && !result.startsWith("[PUBREQ")) {
+                double elapsedMs = (end - start) / 1_000_000.0;
+                SwingUtilities.invokeLater(() -> lblTiming.setText(String.format("Çözme: %.3f ms", elapsedMs)));
+            }
+            return result;
+        } catch (Exception e) {
+            return "[HATA] İşlem hatası: " + e.getMessage();
+        }
+    }
+
+    private String handleIncomingInternal(String line) {
         WireMessage m = WireMessage.parse(line);
-        if (m == null) return "[HATA] Geçersiz satır: " + line;
+        if (m == null)
+            return "[HATA] Geçersiz satır: " + line;
 
-        // PUBKEY
-        if ("PUBKEY".equals(m.algorithm)) {
+        // PUBKEY (RSA_PUB)
+        if (CryptoUtils.ALGO_RSA_PUB.equals(m.algorithm)) {
             try {
-                byte[] keyBytes = Base64.getDecoder().decode(m.payloadB64);
-                KeyFactory kf = KeyFactory.getInstance("RSA");
-                PublicKey pk = kf.generatePublic(new X509EncodedKeySpec(keyBytes));
-                remotePublicKeys.put(m.sender, pk);
-                return "[INFO] " + m.sender + " için RSA public key alındı.";
+                // Double-decoded: payloadB64 -> pubB64 string -> PublicKey
+                String pubB64 = new String(Base64.getDecoder().decode(m.payloadB64), StandardCharsets.UTF_8);
+                PublicKey pk = CryptoUtils.pubKeyFromB64(pubB64);
+                String senderNick = m.sender.trim();
+                remotePublicKeys.put(senderNick, pk);
+                System.out.println("[PUBKEY] stored for nick=" + senderNick + " key=" + pk.getAlgorithm());
+                return null; // Chat ekranına basma
             } catch (Exception e) {
-                return "[HATA] PUBKEY çözülürken hata: " + e.getMessage();
+                return "[HATA] RSA_PUB çözülürken hata: " + e.getMessage();
             }
         }
 
-        // SESSKEY
-        if ("SESSKEY".equals(m.algorithm)) {
+        // PUBREQ (RSA_PUBREQ)
+        if (CryptoUtils.ALGO_RSA_PUBREQ.equals(m.algorithm)) {
+            // A peer requested public keys (likely a late joiner).
+            // We should re-broadcast our PUBKEY, but properly rate-limited per requestor
+            // (or globally).
+            // Logic: if we haven't sent a PUBKEY triggered by *this* user recently?
+            // Actually, we are broadcasting to ALL. So we should limit our OWN output
+            // frequency.
+            // Let's track when WE last broadcasted PUBKEY to avoid flooding the room if
+            // multiple people join.
+            // Or better: track per requestor?
+            // "aynı senderNick için 2 saniye içinde tekrar PUBKEY broadcast etme" -> means
+            // track per requestor.
+
+            String reqNick = m.sender;
+            long now = System.currentTimeMillis();
+            Long last = lastPubSentMs.get(reqNick);
+
+            if (last != null && (now - last < PUB_RESEND_DELAY_MS)) {
+                System.out.println("[PUBREQ] skipped rate-limit for=" + reqNick);
+                return null;
+            }
+
+            lastPubSentMs.put(reqNick, now);
+            System.out.println("[PUBREQ] from=" + reqNick + " -> sending PUBKEY");
+            sendPublicKey(); // Broadcasts our key again
+
+            return null;
+        }
+
+        // HYBRID DECRYPTION (AES/DES + RSA)
+        if (m.algorithm.endsWith("_RSA")) {
             try {
-                byte[] ct = Base64.getDecoder().decode(m.payloadB64);
-                byte[] pt = rsaDecrypt(ct);
-                String sessionKey = new String(pt, StandardCharsets.UTF_8);
-                sessionKeys.put(m.sender, sessionKey);
-                return "[INFO] " + m.sender + " için oturum anahtarı alındı (RSA).";
+                // 1. Payload decode
+                String payloadPlain = new String(Base64.getDecoder().decode(m.payloadB64), StandardCharsets.UTF_8);
+                System.out.println("[HYBRID_DEBUG] Algo=" + m.algorithm + " IV=" + m.ivB64);
+                System.out.println("[HYBRID_DEBUG] PayloadPlain=" + payloadPlain);
+
+                // 2. Decode JSON or Legacy
+                String ctUrlB64;
+                Map<String, String> keysMap;
+
+                if (payloadPlain.trim().startsWith("{")) {
+                    Object[] res = CryptoUtils.decodeHybridPayloadJsonV1(payloadPlain);
+                    ctUrlB64 = (String) res[0];
+                    keysMap = (Map<String, String>) res[1];
+                } else {
+                    Object[] res = CryptoUtils.decodeHybridPayloadLegacyV1(payloadPlain);
+                    ctUrlB64 = (String) res[0];
+                    keysMap = (Map<String, String>) res[1];
+                }
+
+                if (ctUrlB64 == null || keysMap == null || keysMap.isEmpty()) {
+                    return "[HATA] Hybrid format çözülemedi: " + payloadPlain;
+                }
+
+                // 3. Find my wrapped key
+                String myNick = tfNick.getText().trim();
+                // Case-insensitive match for nick? usually nicks are case-sensitive or
+                // normalized.
+                // We normalized to trim() at connect. Let's assume exact match or simple
+                // ignoring case.
+                String myWrapped = keysMap.get(myNick);
+                if (myWrapped == null) {
+                    // Try case-insensitive lookup
+                    for (Map.Entry<String, String> e : keysMap.entrySet()) {
+                        if (e.getKey().equalsIgnoreCase(myNick)) {
+                            myWrapped = e.getValue();
+                            break;
+                        }
+                    }
+                }
+
+                if (myWrapped == null) {
+                    System.out.println("[HYBRID] no wrapped key for me: nick=" + myNick);
+                    return "[" + m.sender + "] (Bu mesaj size şifrelenmemiş/key yok)";
+                }
+
+                // 4. Unwrap
+                System.out.println("[HYBRID] found wrapped key for me: nick=" + myNick);
+                byte[] sessionKey = CryptoUtils.rsaUnwrapKeyUrlB64(rsaPrivate, myWrapped);
+
+                // 5. Decrypt Symmetric
+                String plain = null;
+                // Provider selection: if algo has "(BC)" and BC is available -> use "BC"
+                // else use default (null).
+                String provider = null;
+                if (m.algorithm.contains("_BC") && CryptoUtils.isBcAvailable()) {
+                    provider = "BC";
+                }
+
+                if (m.algorithm.contains("AES-GCM") || m.algorithm.contains("AES_GCM")) {
+                    plain = CryptoUtils.aesGcmDecryptWithKey(sessionKey, m.ivB64, ctUrlB64, provider);
+                } else if (m.algorithm.contains("DES")) {
+                    plain = CryptoUtils.desEcbDecryptWithKey(sessionKey, ctUrlB64, provider);
+                } else {
+                    return "[HATA] Bilinmeyen Hybrid algo: " + m.algorithm;
+                }
+
+                return String.format("[%s] %s", m.sender, plain);
+
             } catch (Exception e) {
-                return "[HATA] SESSKEY çözülürken hata: " + e.getMessage();
+                return "[HATA] Hybrid çözüm hatası: " + e.getMessage();
             }
         }
+
+        // SESSKEY (Old Legacy)
 
         String decrypted;
         boolean ok = false;
@@ -352,29 +546,36 @@ public class SecureChatClient extends JFrame {
             if (!m.encrypted || CryptoUtils.ALGO_NONE.equals(m.algorithm)) {
                 decrypted = new String(
                         Base64.getDecoder().decode(m.payloadB64),
-                        StandardCharsets.UTF_8
-                );
+                        StandardCharsets.UTF_8);
                 ok = true;
             } else {
                 String raw = new String(
                         Base64.getDecoder().decode(m.payloadB64),
-                        StandardCharsets.UTF_8
-                );
+                        StandardCharsets.UTF_8);
                 String keyForDec = resolveKeyForIncoming(m.algorithm, m.sender);
+
+                String algoToUse = m.algorithm;
+                if (CryptoUtils.ALGO_AES_GCM_BC.equals(algoToUse) && !CryptoUtils.isBcAvailable()) {
+                    algoToUse = CryptoUtils.ALGO_AES_GCM;
+                } else if (CryptoUtils.ALGO_DES_BC.equals(algoToUse) && !CryptoUtils.isBcAvailable()) {
+                    algoToUse = CryptoUtils.ALGO_DES;
+                }
+
                 decrypted = CryptoUtils.decrypt(
-                        m.algorithm,
+                        algoToUse,
                         raw,
-                        keyForDec
-                );
+                        keyForDec);
                 ok = true;
             }
         } catch (Exception ex) {
             decrypted = "(Çözüm hata: " + ex.getMessage() + ")";
         }
 
-        return String.format("[%s] alg=%s enc=%s ⇒ %s",
-                m.sender, m.algorithm, m.encrypted,
-                decrypted + (ok ? "" : "  (RAW: " + line + ")"));
+        if (ok) {
+            return String.format("[%s] %s", m.sender, decrypted);
+        } else {
+            return String.format("[%s] [Şifreli? %s] %s (RAW: %s)", m.sender, m.algorithm, decrypted, line);
+        }
     }
 
     private String resolveKeyForIncoming(String algo, String senderNick) {
@@ -393,28 +594,7 @@ public class SecureChatClient extends JFrame {
 
     private String getSelectedAlgoCode() {
         String s = (String) cbAlgo.getSelectedItem();
-        if (s == null) return CryptoUtils.ALGO_NONE;
-
-        if (s.startsWith("Caesar"))        return CryptoUtils.ALGO_CAESAR;
-        if (s.startsWith("Vigen"))         return CryptoUtils.ALGO_VIGENERE;
-        if (s.startsWith("Substitution"))  return CryptoUtils.ALGO_SUBST;
-        if (s.startsWith("Affine"))        return CryptoUtils.ALGO_AFFINE;
-        if (s.startsWith("Playfair"))      return CryptoUtils.ALGO_PLAYFAIR;
-        if (s.startsWith("Rail Fence"))    return CryptoUtils.ALGO_RAILFENCE;
-        if (s.startsWith("Route"))         return CryptoUtils.ALGO_ROUTE;
-        if (s.startsWith("Columnar"))      return CryptoUtils.ALGO_COLUMNAR;
-        if (s.startsWith("Polybius"))      return CryptoUtils.ALGO_POLYBIUS;
-        if (s.startsWith("Pigpen"))        return CryptoUtils.ALGO_PIGPEN;
-        if (s.startsWith("AES-GCM"))       return CryptoUtils.ALGO_AES_GCM;
-        if (s.startsWith("DES"))           return CryptoUtils.ALGO_DES;
-        if (s.startsWith("Hill"))          return CryptoUtils.ALGO_HILL;
-        if (s.startsWith("3DES"))          return CryptoUtils.ALGO_3DES;
-        if (s.startsWith("Blowfish"))      return CryptoUtils.ALGO_BLOWFISH;
-        if (s.startsWith("GOST"))          return CryptoUtils.ALGO_GOST;
-        if (s.startsWith("Feistel"))       return CryptoUtils.ALGO_FEISTEL;
-        if (s.startsWith("SPN"))           return CryptoUtils.ALGO_SPN;
-
-        return CryptoUtils.ALGO_NONE;
+        return cryptoo.crypto.ui.AlgoLabelMapper.toCode(s);
     }
 
     private String resolveKeyForOutgoing(String algoCode) {
@@ -428,7 +608,12 @@ public class SecureChatClient extends JFrame {
             if (sess != null && !sess.isEmpty()) {
                 return sess;
             }
-            throw new IllegalStateException("AES-GCM için parola ya da oturum anahtarı yok. (Önce 'Oturum Anahtarı (RSA)' gönder veya key gir.)");
+            throw new IllegalStateException(
+                    "AES-GCM için parola ya da oturum anahtarı yok. (Önce 'Oturum Anahtarı (RSA)' gönder veya key gir.)");
+        }
+        // Hybrid modes don't need manual key (auto-gen)
+        if (algoCode.endsWith("_RSA")) {
+            return null; // Ignored
         }
         return tfKey.getText();
     }
@@ -440,10 +625,23 @@ public class SecureChatClient extends JFrame {
         }
 
         String msg = tfMessage.getText();
-        if (msg.isEmpty()) return;
+        if (msg.isEmpty())
+            return;
 
         String algoCode = encrypted ? getSelectedAlgoCode() : CryptoUtils.ALGO_NONE;
-        String sender   = tfNick.getText().trim().isEmpty()
+
+        // Fallback check
+        if (!CryptoUtils.isBcAvailable()) {
+            if (CryptoUtils.ALGO_AES_GCM_BC.equals(algoCode)) {
+                toast("BC provider bulunamadı, AES-GCM (default) ile gönderiliyor.");
+                algoCode = CryptoUtils.ALGO_AES_GCM;
+            } else if (CryptoUtils.ALGO_DES_BC.equals(algoCode)) {
+                toast("BC provider bulunamadı, DES (default) ile gönderiliyor.");
+                algoCode = CryptoUtils.ALGO_DES;
+            }
+        }
+
+        String sender = tfNick.getText().trim().isEmpty()
                 ? "Anon"
                 : tfNick.getText().trim();
 
@@ -451,26 +649,93 @@ public class SecureChatClient extends JFrame {
         String payloadB64;
 
         try {
+            long start = System.nanoTime();
             if (!encrypted || CryptoUtils.ALGO_NONE.equals(algoCode)) {
                 payloadB64 = Base64.getEncoder().encodeToString(
                         msg.getBytes(StandardCharsets.UTF_8));
+            } else if (algoCode.endsWith("_RSA")) {
+                // HYBRID SEND LOGIC
+                if (remotePublicKeys.isEmpty()) {
+                    toast("Hiçbir alıcı Public Key'i (RSA) bulunamadı. Mesaj şifrelenemez.");
+                    return;
+                }
+
+                // 1. Session Key Gen
+                byte[] sessionKey;
+                if (algoCode.contains("AES")) {
+                    sessionKey = new byte[16];
+                } else { // DES
+                    sessionKey = new byte[8];
+                }
+                new SecureRandom().nextBytes(sessionKey);
+
+                // 2. Encrypt Content
+                String ctUrlB64;
+                String provider = null;
+                if (algoCode.contains("_BC") && CryptoUtils.isBcAvailable()) {
+                    provider = "BC";
+                }
+
+                if (algoCode.contains("AES")) {
+                    String[] res = CryptoUtils.aesGcmEncryptWithKey(sessionKey, msg, provider);
+                    ivB64 = res[0];
+                    ctUrlB64 = res[1];
+                } else { // DES
+                    ivB64 = ""; // not used in ECB
+                    ctUrlB64 = CryptoUtils.desEcbEncryptWithKey(sessionKey, msg, provider);
+                }
+
+                // 3. Wrap Keys for ALL peers (sending to broadcast for now - conceptually)
+                // Filter out SELF to keep payload small. Only real peers needed.
+
+                String myNick = sender;
+                Map<String, String> wrappedKeysByNick = new HashMap<>();
+
+                for (Map.Entry<String, PublicKey> entry : remotePublicKeys.entrySet()) {
+                    String nick = entry.getKey();
+                    if (nick.equalsIgnoreCase(myNick))
+                        continue; // Skip self
+
+                    String wrapped = CryptoUtils.rsaWrapKeyUrlB64(entry.getValue(), sessionKey);
+                    wrappedKeysByNick.put(nick, wrapped);
+                }
+
+                if (wrappedKeysByNick.isEmpty()) {
+                    toast("Henüz karşı tarafın RSA public key'i gelmedi.");
+                    return;
+                }
+
+                System.out.println("[HYBRID] algo=" + algoCode + " peers=" + wrappedKeysByNick.keySet());
+
+                // 4. Construct JSON Payload
+                String payloadJson = CryptoUtils.encodeHybridPayloadJsonV1(ctUrlB64, wrappedKeysByNick);
+                payloadB64 = Base64.getEncoder().encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
+
             } else {
                 String key = resolveKeyForOutgoing(algoCode);
                 String enc = CryptoUtils.encrypt(algoCode, msg, key);
                 payloadB64 = Base64.getEncoder().encodeToString(
                         enc.getBytes(StandardCharsets.UTF_8));
             }
-        } catch (Exception e) {
-            toast("Şifreleme hatası: " + e.getMessage());
-            return;
-        }
+            long end = System.nanoTime();
+            double elapsedMs = (end - start) / 1_000_000.0;
+            lblTiming.setText(String.format("Şifreleme: %.3f ms", elapsedMs));
 
-        WireMessage w = new WireMessage(
-                sender, algoCode, encrypted, ivB64,
-                payloadB64, System.currentTimeMillis()
-        );
-        out.println(w.format());
-        tfMessage.setText("");
+            WireMessage w = new WireMessage(
+                    sender, algoCode, encrypted, ivB64,
+                    payloadB64, System.currentTimeMillis());
+            out.println(w.format());
+            // Log & UI
+            String disp = encrypted ? String.format("[%s] (Şifreli %s) %s", sender, algoCode, msg)
+                    : String.format("[%s] %s", sender, msg);
+            chatArea.append(disp + "\n");
+            tfMessage.setText("");
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            toast("Gönderim Hatası: " + e.getMessage());
+            chatArea.append("[SİSTEM] Mesaj gönderilemedi: " + e.getMessage() + "\n");
+        }
     }
 
     // ==========================================================
@@ -479,27 +744,28 @@ public class SecureChatClient extends JFrame {
 
     private void initRSA() {
         try {
-            KeyPairGenerator gen = KeyPairGenerator.getInstance("RSA");
-            gen.initialize(2048);
-            rsaKeyPair = gen.generateKeyPair();
-            rsaPublic  = rsaKeyPair.getPublic();
+            rsaKeyPair = CryptoUtils.genRsaKeyPair();
+            rsaPublic = rsaKeyPair.getPublic();
             rsaPrivate = rsaKeyPair.getPrivate();
-            appendInfo("RSA anahtar çifti oluşturuldu.");
+            appendInfo("RSA anahtar çifti oluşturuldu (2048-bit).");
         } catch (Exception e) {
             appendInfo("RSA init hata: " + e.getMessage());
         }
     }
 
     private void sendPublicKey() {
-        if (out == null || rsaPublic == null) return;
+        if (out == null || rsaPublic == null)
+            return;
         String nick = tfNick.getText().trim().isEmpty() ? "Anon" : tfNick.getText().trim();
-        String pubB64 = Base64.getEncoder().encodeToString(rsaPublic.getEncoded());
+        String pubB64 = CryptoUtils.pubKeyToB64(rsaPublic); // Get helper output
+        // Request: payloadB64 = Base64(pubB64 bytes)
+        String payloadB64 = Base64.getEncoder().encodeToString(pubB64.getBytes(StandardCharsets.UTF_8));
+
         WireMessage w = new WireMessage(
-                nick, "PUBKEY", false, "",
-                pubB64, System.currentTimeMillis()
-        );
+                nick, CryptoUtils.ALGO_RSA_PUB, false, "",
+                payloadB64, System.currentTimeMillis());
         out.println(w.format());
-        appendInfo("Public key yayınlandı.");
+        // appendInfo("Public key yayınlandı."); // Logging noise reduced
     }
 
     private void sendSessionKey() {
@@ -527,8 +793,7 @@ public class SecureChatClient extends JFrame {
 
                 WireMessage w = new WireMessage(
                         selfNick, "SESSKEY", true, "",
-                        ctB64, System.currentTimeMillis()
-                );
+                        ctB64, System.currentTimeMillis());
                 out.println(w.format());
             } catch (Exception ex) {
                 appendInfo("Oturum anahtarı gönderilirken hata (" + e.getKey() + "): " + ex.getMessage());
